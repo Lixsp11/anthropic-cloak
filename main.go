@@ -20,9 +20,11 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,12 +33,83 @@ const host = "api.anthropic.com"
 const maxBody = 32 << 20
 
 var billing = regexp.MustCompile("(?im)^[ \t]*x\u200b?-anthropic-billing-header:[^\r\n]*(?:\r\n|\r|\n|$)")
-var sdk = regexp.MustCompile("(?i)Claude Agent SDK")
+var clientIdentity = regexp.MustCompile("(?i)Claude (?:Agent SDK|Code)")
 
 func cleanText(s string) string {
 	s = billing.ReplaceAllString(s, "")
-	return sdk.ReplaceAllStringFunc(s, func(m string) string { return m[:1] + "\u200b" + m[1:] })
+	return clientIdentity.ReplaceAllStringFunc(s, func(m string) string { return m[:1] + "\u200b" + m[1:] })
 }
+
+// An altered client identity prefix cannot retain the original global cache scope.
+// Preserve cache boundaries and TTL while using the default cache scope.
+func removeGlobalControl(object map[string]json.RawMessage) bool {
+	var control map[string]json.RawMessage
+	var scope string
+	if json.Unmarshal(object["cache_control"], &control) != nil || control == nil {
+		return false
+	}
+	if json.Unmarshal(control["scope"], &scope) != nil || scope != "global" {
+		return false
+	}
+	delete(control, "scope")
+	object["cache_control"], _ = json.Marshal(control)
+	return true
+}
+
+func normalizeBlockScopes(raw json.RawMessage) json.RawMessage {
+	var blocks []json.RawMessage
+	if json.Unmarshal(raw, &blocks) != nil || blocks == nil {
+		return raw
+	}
+	changed := false
+	for i, rawBlock := range blocks {
+		var block map[string]json.RawMessage
+		if json.Unmarshal(rawBlock, &block) != nil || block == nil {
+			continue
+		}
+		if removeGlobalControl(block) {
+			blocks[i], _ = json.Marshal(block)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	result, _ := json.Marshal(blocks)
+	return result
+}
+
+func normalizeCacheScopes(body map[string]json.RawMessage) {
+	removeGlobalControl(body)
+	for _, key := range []string{"system", "tools"} {
+		if raw, ok := body[key]; ok {
+			body[key] = normalizeBlockScopes(raw)
+		}
+	}
+	var messages []json.RawMessage
+	if json.Unmarshal(body["messages"], &messages) != nil || messages == nil {
+		return
+	}
+	changed := false
+	for i, rawMessage := range messages {
+		var message map[string]json.RawMessage
+		if json.Unmarshal(rawMessage, &message) != nil || message == nil {
+			continue
+		}
+		if raw, ok := message["content"]; ok {
+			normalized := normalizeBlockScopes(raw)
+			if !bytes.Equal(raw, normalized) {
+				message["content"] = normalized
+				messages[i], _ = json.Marshal(message)
+				changed = true
+			}
+		}
+	}
+	if changed {
+		body["messages"], _ = json.Marshal(messages)
+	}
+}
+
 func rewriteBody(raw []byte) ([]byte, error) {
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &body); err != nil || body == nil {
@@ -46,8 +119,10 @@ func rewriteBody(raw []byte) ([]byte, error) {
 	if !ok {
 		return raw, nil
 	}
+	identityChanged := false
 	var s string
 	if json.Unmarshal(sys, &s) == nil {
+		identityChanged = clientIdentity.MatchString(s)
 		cleaned := cleanText(s)
 		if s == cleaned {
 			return raw, nil
@@ -76,6 +151,7 @@ func rewriteBody(raw []byte) ([]byte, error) {
 				kept = append(kept, block)
 				continue
 			}
+			identityChanged = identityChanged || clientIdentity.MatchString(text)
 			cleaned := cleanText(text)
 			if cleaned != text {
 				changed = true
@@ -95,6 +171,9 @@ func rewriteBody(raw []byte) ([]byte, error) {
 		} else {
 			body["system"], _ = json.Marshal(kept)
 		}
+	}
+	if identityChanged {
+		normalizeCacheScopes(body)
 	}
 	return json.Marshal(body)
 }
@@ -128,6 +207,7 @@ type gateway struct {
 	cert      tls.Certificate
 	transport http.RoundTripper
 	rewrite   bool
+	mock      bool
 }
 
 func (g *gateway) forward(r *http.Request) (*http.Response, error) {
@@ -162,6 +242,9 @@ func (g *gateway) forward(r *http.Request) (*http.Response, error) {
 		}
 		had := strings.Contains(r.Header.Get("Anthropic-Beta"), "claude-code-20250219")
 		filterBeta(r.Header)
+		if strings.HasPrefix(strings.ToLower(r.Header.Get("User-Agent")), "claude-cli/") {
+			r.Header.Del("User-Agent")
+		}
 		r.Body = io.NopCloser(bytes.NewReader(changed))
 		r.ContentLength = int64(len(changed))
 		r.TransferEncoding = nil
@@ -171,9 +254,88 @@ func (g *gateway) forward(r *http.Request) (*http.Response, error) {
 	}
 	return g.transport.RoundTrip(r)
 }
+func (g *gateway) serveTunnel(w http.ResponseWriter, r *http.Request) {
+	if g.mock {
+		http.Error(w, "external forwarding disabled in mock mode", http.StatusForbidden)
+		return
+	}
+	hostname, port, err := net.SplitHostPort(r.Host)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || hostname == "" || portErr != nil || portNumber < 1 || portNumber > 65535 {
+		http.Error(w, "invalid CONNECT destination", http.StatusBadRequest)
+		return
+	}
+	upstream, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	if err != nil {
+		http.Error(w, "upstream connection failed", http.StatusBadGateway)
+		return
+	}
+	defer upstream.Close()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connection hijacking unavailable", http.StatusInternalServerError)
+		return
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if _, err = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	if err = rw.Flush(); err != nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(upstream, rw)
+		if tcp, ok := upstream.(*net.TCPConn); ok {
+			tcp.CloseWrite()
+		}
+	}()
+	io.Copy(conn, upstream)
+	conn.Close()
+	upstream.Close()
+	<-done
+}
+
+func (g *gateway) servePlainHTTP(w http.ResponseWriter, r *http.Request) {
+	if g.mock {
+		http.Error(w, "external forwarding disabled in mock mode", http.StatusForbidden)
+		return
+	}
+	if r.URL.Scheme != "http" || r.URL.Host == "" || r.URL.User != nil {
+		http.Error(w, "absolute HTTP URL required", http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(r.URL.Hostname(), host) {
+		http.Error(w, "HTTPS required for Anthropic API", http.StatusBadRequest)
+		return
+	}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.Host = pr.Out.URL.Host
+			pr.Out.Header.Del("Proxy-Authorization")
+			pr.Out.Header.Del("Proxy-Connection")
+		},
+		Transport:     g.transport,
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			http.Error(w, "upstream connection failed", http.StatusBadGateway)
+		},
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "CONNECT" || r.Host != host+":443" {
-		http.Error(w, "destination not allowed", 403)
+	if r.Method != "CONNECT" {
+		g.servePlainHTTP(w, r)
+		return
+	}
+	if !strings.EqualFold(r.Host, host+":443") {
+		g.serveTunnel(w, r)
 		return
 	}
 	conn, rw, err := w.(http.Hijacker).Hijack()
@@ -290,6 +452,6 @@ func main() {
 		rt = mockTransport{}
 	}
 	fmt.Printf("listen=%s rewrite=%t mock=%t\n", *addr, *rewrite, *mock)
-	server := &http.Server{Addr: *addr, Handler: &gateway{cert: cert, transport: rt, rewrite: *rewrite}, ReadHeaderTimeout: 15 * time.Second}
+	server := &http.Server{Addr: *addr, Handler: &gateway{cert: cert, transport: rt, rewrite: *rewrite, mock: *mock}, ReadHeaderTimeout: 15 * time.Second}
 	log.Fatal(server.ListenAndServe())
 }

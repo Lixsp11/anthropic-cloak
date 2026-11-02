@@ -9,12 +9,15 @@ For POST requests to /v1/messages and /v1/messages/count_tokens:
 - Remove x-anthropic-billing-header attribution lines from system text.
   Remove the entire text block when it becomes empty, or omit system when
   no blocks remain.
-- Insert U+200B after the first character of Claude Agent SDK matches in
-  system text, case-insensitively.
+- Insert U+200B after the first character of Claude Agent SDK or Claude Code
+  matches in system text, case-insensitively.
 - Remove only claude-code-20250219 from the anthropic-beta list.
+- Remove the identifying claude-cli User-Agent header on rewritten API requests.
 
-User messages, cache metadata on retained blocks and other beta values are
-preserved. Gzip bodies are supported up to 32 MiB after decompression.
+User message text and other beta values are preserved. When a client identity system
+prefix is rewritten, explicit global cache scope is removed from API cache
+metadata to avoid incompatible global-prefix validation. Cache boundaries
+and TTL are preserved, but cache hit rates and token costs can change. Gzip bodies are supported up to 32 MiB after decompression.
 Response bodies, including server-sent events, are streamed.
 
 This is not an authentication or billing workaround. A valid credential
@@ -23,9 +26,10 @@ guaranteed to resolve upstream errors.
 
 ## Downloads
 
-In the Actions tab, select a successful Build run and download the artifact
-for your platform. Linux, Windows and macOS builds include amd64 and arm64.
-Artifacts are unsigned. Windows and macOS may require additional approval
+Download the archive for your platform from GitHub Releases and verify it
+using SHA256SUMS. Linux, Windows and macOS builds include amd64 and arm64.
+Numeric version tags, including 0.1, trigger tests, builds, and release upload.
+Branch builds remain available in the Actions tab. Builds are unsigned. Windows and macOS may require additional approval
 before running a downloaded executable.
 
 ## Build
@@ -46,8 +50,10 @@ Windows PowerShell:
 
     .\anthropic-cloak.exe -listen 127.0.0.1:18080 -cert-dir tmp/certs
 
-The proxy accepts CONNECT only for api.anthropic.com:443 and binds only to
-loopback. It creates a local test CA certificate and a leaf certificate
+The proxy binds only to loopback. CONNECT requests to api.anthropic.com:443
+are inspected; other CONNECT destinations use opaque TCP tunnels without
+TLS interception. Ordinary HTTP proxy requests are forwarded without the
+Anthropic rewrite rules. Use HTTPS for Anthropic API requests. It creates a local test CA certificate and a leaf certificate
 valid for 24 hours. Private key files have owner-only permissions on Unix.
 On Windows, protect the certificate directory with an appropriate ACL.
 
@@ -66,7 +72,8 @@ Windows PowerShell:
     claude
 
 Ensure lowercase proxy variables do not override this setting and NO_PROXY
-does not bypass api.anthropic.com. Configure authentication separately.
+does not bypass api.anthropic.com. Claude login and startup domains can use
+the proxy directly; no domain-specific bypass is required. Configure authentication separately.
 Never commit credentials. No API endpoint override is required.
 
 Do not disable TLS validation or install the test CA into system trust.
@@ -79,7 +86,7 @@ After expiry, stop the proxy and choose a fresh directory under tmp/ using
 | --- | --- | --- |
 | -listen | 127.0.0.1:18080 | Loopback HTTP proxy listener |
 | -cert-dir | tmp/certs | Local test certificates |
-| -rewrite | true | Enable the three transformations |
+| -rewrite | true | Enable request transformations |
 | -mock | false | Synthetic upstream; no Anthropic requests |
 
 Use -rewrite=false for pass-through comparison, or -mock for local testing.
@@ -92,7 +99,7 @@ Inspect only traffic you are authorized to inspect. Audit logs contain
 transformation booleans and HTTP status, not bodies or credential values.
 Upstream TLS certificates are verified normally.
 
-Tests cover transformations, gzip, TLS CONNECT, destination restrictions,
+Tests cover transformations, gzip, TLS CONNECT, opaque TLS tunnels, ordinary HTTP forwarding, mock isolation,
 idempotency and delivery of the first SSE chunk before upstream completion.
 Compatibility with all client features, signed thinking histories, long
 conversations and production workloads is not established. Inbound TLS uses

@@ -100,8 +100,8 @@ func TestGzip(t *testing.T) {
 	}
 	resp.Body.Close()
 }
-func TestDestinationRestriction(t *testing.T) {
-	g := gateway{}
+func TestMockDestinationRestriction(t *testing.T) {
+	g := gateway{mock: true}
 	r := httptest.NewRequest("CONNECT", "http://example.com:443", nil)
 	r.Host = "example.com:443"
 	w := httptest.NewRecorder()
