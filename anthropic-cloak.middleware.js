@@ -72,7 +72,14 @@ function system(m, text) {
 }
 
 function parts(list, text) {
-  if (Array.isArray(list)) for (const p of list) if (p && typeof p.text === "string") p.text = text(p.text)
+  if (!Array.isArray(list)) return list
+  for (let i = list.length - 1; i >= 0; i--) {
+    const p = list[i]
+    if (p && typeof p.text === "string") {
+      p.text = text(p.text)
+      if (!p.text.trim()) list.splice(i, 1)
+    }
+  }
   return list
 }
 
