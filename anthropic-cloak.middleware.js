@@ -40,9 +40,10 @@ export function onProvider(body, ctx) {
   const list = words.concat(Array.isArray(o.extraWords) ? o.extraWords.filter((w) => typeof w === "string" && w.length > 1) : [])
   const cloak = cloaker(list)
   let changed = false
+  const billing = /^[ \t]*x-anthropic-billing-header:[^\r\n]*(?:\r\n|\r|\n)?/gm
   const text = (s) => {
     if (typeof s !== "string") return s
-    const t = cloak(s)
+    const t = cloak(s.replace(billing, ""))
     if (t !== s) changed = true
     return t
   }
