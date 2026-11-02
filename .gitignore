@@ -1,2 +1,8 @@
-node_modules/
-*.tgz
+/tmp/
+/dist/
+/anthropic-cloak
+/anthropic-cloak.exe
+*.pem
+*.key
+.env
+.env.*

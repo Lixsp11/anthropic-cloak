@@ -1,73 +1,103 @@
 # Anthropic Cloak
 
-A standalone Magpie gateway middleware plugin derived from the MIT-licensed [Antigravity Cloak](https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak), with explicit provider-ID matching through the `providers` option.
+An experimental local HTTPS audit and compatibility proxy written in Go.
+The client endpoint remains https://api.anthropic.com.
 
-The plugin lives at the repository root. Its package name is `anthropic-cloak`, and its entry point is `anthropic-cloak.middleware.js`. Renaming the plugin does not automatically enable Anthropic API-key routes: you must configure the actual provider ID.
+## Behavior
 
-## Installation
+For POST requests to /v1/messages and /v1/messages/count_tokens:
+- Remove x-anthropic-billing-header attribution lines from system text.
+  Remove the entire text block when it becomes empty, or omit system when
+  no blocks remain.
+- Insert U+200B after the first character of Claude Agent SDK matches in
+  system text, case-insensitively.
+- Remove only claude-code-20250219 from the anthropic-beta list.
 
-Enter the following in Magpie's **Add a plugin** field:
+User messages, cache metadata on retained blocks and other beta values are
+preserved. Gzip bodies are supported up to 32 MiB after decompression.
+Response bodies, including server-sent events, are streamed.
 
-```text
-github:Lixsp11/anthropic-cloak
-```
+This is not an authentication or billing workaround. A valid credential
+and sufficient account access are required. Rewriting requests is not
+guaranteed to resolve upstream errors.
 
-Or use the CLI:
+## Downloads
 
-```sh
-magpie plugin add github:Lixsp11/anthropic-cloak
-```
+In the Actions tab, select a successful Build run and download the artifact
+for your platform. Linux, Windows and macOS builds include amd64 and arm64.
+Artifacts are unsigned. Windows and macOS may require additional approval
+before running a downloaded executable.
 
-To load a local checkout, run this from the repository directory:
+## Build
 
-```sh
-magpie plugin add .
-```
+Go 1.24 or later is required. Only the Go standard library is used.
 
-Do not append `/packages/antigravity-cloak`, and do not enable this plugin and the original at the same time. This package has not been published to npm; use the GitHub spec or a local directory.
+    go test -timeout 30s ./...
+    go build -trimpath -o anthropic-cloak .
 
-## Configuration
+On Windows, use anthropic-cloak.exe as the output name.
+Keep repository-local temporary files under tmp/.
 
-Open **Options** for the installed **Anthropic Cloak** plugin and set:
+## Run
 
-```json
-{
-  "providers": ["my-api"],
-  "extraWords": [],
-  "off": false
-}
-```
+    ./anthropic-cloak -listen 127.0.0.1:18080 -cert-dir tmp/certs
 
-Replace `my-api` with the actual provider **ID** in Magpie, not its display name, hostname, or model name. Use `anthropic` only if that is the provider's actual ID.
+Windows PowerShell:
 
-| Option | Default | Meaning |
+    .\anthropic-cloak.exe -listen 127.0.0.1:18080 -cert-dir tmp/certs
+
+The proxy accepts CONNECT only for api.anthropic.com:443 and binds only to
+loopback. It creates a local test CA certificate and a leaf certificate
+valid for 24 hours. Private key files have owner-only permissions on Unix.
+On Windows, protect the certificate directory with an appropriate ACL.
+
+Configure only the client process you intend to inspect.
+
+Linux or macOS:
+
+    export HTTPS_PROXY=http://127.0.0.1:18080
+    export NODE_EXTRA_CA_CERTS="$PWD/tmp/certs/ca.pem"
+    claude
+
+Windows PowerShell:
+
+    $env:HTTPS_PROXY = "http://127.0.0.1:18080"
+    $env:NODE_EXTRA_CA_CERTS = "$PWD\tmp\certs\ca.pem"
+    claude
+
+Ensure lowercase proxy variables do not override this setting and NO_PROXY
+does not bypass api.anthropic.com. Configure authentication separately.
+Never commit credentials. No API endpoint override is required.
+
+Do not disable TLS validation or install the test CA into system trust.
+After expiry, stop the proxy and choose a fresh directory under tmp/ using
+-cert-dir.
+
+## Options
+
+| Flag | Default | Purpose |
 | --- | --- | --- |
-| `providers` | `[]` | Exact, case-sensitive matches against `ctx.provider.id`, including API-key routes. Empty strings and non-string entries are ignored. |
-| `accounts` | `["antigravity"]` | Matches the subscription kind in `ctx.provider.account`. This field is absent on API-key routes. |
-| `extraWords` | `[]` | Additional text to split, matched case-insensitively. |
-| `off` | `false` | When true, skips all rewriting. |
+| -listen | 127.0.0.1:18080 | Loopback HTTP proxy listener |
+| -cert-dir | tmp/certs | Local test certificates |
+| -rewrite | true | Enable the three transformations |
+| -mock | false | Synthetic upstream; no Anthropic requests |
 
-A match in either `accounts` or `providers` enables the middleware. The original default behavior is preserved: without `providers`, only the Antigravity subscription kind is selected. An empty `accounts: []` falls back to that default; it does not disable all matching.
+Use -rewrite=false for pass-through comparison, or -mock for local testing.
+Stop the foreground proxy with Ctrl-C. It installs no service.
 
-At the `onProvider` stage, the middleware inserts a zero-width space (`U+200B`) after the first character of each matched string in system instructions. Ordinary user messages are left unchanged. Anthropic, Chat, Responses, and Gemini formats are supported. HTTP headers are not modified. Magpie must support the `onProvider` hook; the upstream project specifies v0.1.1283 or later.
+## Security and limitations
 
-## Limitations and risks
+The proxy decrypts requests in memory and can see credentials and content.
+Inspect only traffic you are authorized to inspect. Audit logs contain
+transformation booleans and HTTP status, not bodies or credential values.
+Upstream TLS certificates are verified normally.
 
-- This rewrites request text. It does not increase your balance or change a provider's credit eligibility rules.
-- Its use may violate the target provider's terms and could result in account restrictions.
-- Local tests cover matching and rewriting only. Live Anthropic requests, promotional-credit eligibility, and installation through Magpie's online flow have not been verified.
-- This project is not affiliated with Anthropic and is not published under the `@magpie-community` npm namespace.
+Tests cover transformations, gzip, TLS CONNECT, destination restrictions,
+idempotency and delivery of the first SSE chunk before upstream completion.
+Compatibility with all client features, signed thinking histories, long
+conversations and production workloads is not established. Inbound TLS uses
+HTTP/1.1. This project is not affiliated with Anthropic.
 
-## Testing
+## License
 
-Use a modern Node.js version with `node:test` and `structuredClone`, such as Node.js 20 or later. No dependency installation or Bun runtime is required.
-
-```sh
-npm test
-```
-
-The suite includes the original 15 cases, 12 provider-matching regression cases, and a standalone package entry-point check.
-
-## Attribution and license
-
-Based on `packages/antigravity-cloak` from [magpie-community/plugins](https://github.com/magpie-community/plugins). The upstream project credits [hexiaolv/magpie-antigravity-cloak](https://github.com/hexiaolv/magpie-antigravity-cloak) as its basis. The original MIT license and copyright notice are preserved in [LICENSE](LICENSE).
+MIT. See LICENSE.
