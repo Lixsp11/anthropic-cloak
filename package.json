@@ -1,0 +1,38 @@
+{
+  "name": "anthropic-cloak",
+  "version": "0.1.0",
+  "description": "Magpie gateway middleware with opt-in provider-ID matching for system-text rewriting",
+  "type": "module",
+  "files": [
+    "anthropic-cloak.middleware.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test anthropic-cloak.test.mjs"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "magpie-middleware",
+    "anthropic",
+    "antigravity"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lixsp11/anthropic-cloak.git"
+  },
+  "magpie": {
+    "name": "Anthropic Cloak",
+    "middleware": "./anthropic-cloak.middleware.js",
+    "options": {
+      "extraWords": [],
+      "accounts": [
+        "antigravity"
+      ],
+      "providers": [],
+      "off": false
+    }
+  }
+}
